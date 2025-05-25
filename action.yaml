@@ -68,10 +68,10 @@ runs:
           exit 1
         fi
 
-        # Valid sort options provided by:
+        # Valid sort options provided by:
         #  gh release list --json [2025-04-18]
         #   createdAt
-        #   isDraft
+        #   isDraft
         #   isLatest
         #   isPrerelease
         #   name
@@ -98,7 +98,7 @@ runs:
           echo "Sorting releases by: $sort_by ⬇️"
           drafts_only=$(echo "$drafts_only" | jq "sort_by(.$sort_by)")
         fi
-        if [ "$sort_reverse" == 'true' ]; then
+        if [ "$sort_reverse" = 'true' ]; then
           echo 'Reversing result order 🔄'
           drafts_only=$(echo "$drafts_only" | jq '. | reverse')
         fi
@@ -136,7 +136,7 @@ runs:
           release_url=$(gh release edit "$tagName" --draft=false || true)
         fi
         if [ -n "$release_url" ]; then
-          echo "Release promoted: $release_url ✅"
+          echo 'Release promoted: $release_url ✅'
         else
           echo 'Error: GitHub CLI failed to promote release ❌'
           exit 1
