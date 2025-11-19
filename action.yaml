@@ -38,6 +38,11 @@ inputs:
     required: false
     type: 'boolean'
     default: false
+  dry-run:
+    description: 'Perform validation without promoting the release'
+    required: false
+    type: 'boolean'
+    default: false
 
 outputs:
   release_url:
@@ -60,115 +65,103 @@ runs:
         name="${{ inputs.name }}"
         sort_by="${{ inputs.sort_by }}"
         sort_reverse="${{ inputs.sort_reverse }}"
+        dry_run="${{ inputs.dry-run }}"
 
-        # Note: GitHub token must have permissions "content: write"
+        # Validate prerequisites
         if [ -z "$GITHUB_TOKEN" ]; then
           echo 'Error: GitHub token not passed to action ❌'
           exit 1
         fi
 
-        # Check for JQ command
-        jq_cmd=$(which jq)
-        if [ ! -x "$jq_cmd" ]; then
+        if ! command -v jq &> /dev/null; then
           echo 'Error: jq command not found ❌'
           exit 1
         fi
 
-        # Valid sort options provided by:
-        #  gh release list --json [2025-04-18]
-        #   createdAt
-        #   isDraft
-        #   isLatest
-        #   isPrerelease
-        #   name
-        #   publishedAt
-        #   tagName
+        # Get all releases
+        release_data=$(gh release list --json createdAt,isDraft,isLatest,isPrerelease,name,publishedAt,tagName)
+        [ -z "$release_data" ] && { echo 'Error: No releases found ❌'; exit 1; }
+        [ "$ACTIONS_STEP_DEBUG" = 'true' ] && echo "Raw data: $release_data"
 
-        release_data=$(gh release list --json \
-          createdAt,isDraft,isLatest,isPrerelease,name,publishedAt,tagName)
-        if [ -z "$release_data" ]; then
-          echo 'Error: GitHub CLI command returned no results ❌'
-          exit 1
-        elif [ "$ACTIONS_STEP_DEBUG" == 'true' ]; then
-          echo 'Raw GitHub API query data 🐞'
-          echo "$release_data"
-        fi
+        # Ensure data is an array
+        echo "$release_data" | jq -e 'type == "array"' > /dev/null 2>&1 || release_data=$(echo "$release_data" | jq -s '.')
 
-        drafts_only=$(echo $release_data | jq "[.[] | select(.isDraft==true)]")
-        if [ "$ACTIONS_STEP_DEBUG" == 'true' ]; then
-          echo 'Selected draft releases 🐞'
-          echo "$drafts_only"
-        fi
+        # Filter to drafts only
+        drafts_only=$(echo "$release_data" | jq '[.[] | select(.isDraft==true)]')
+        draft_count=$(echo "$drafts_only" | jq 'length')
+        [ "$draft_count" -eq 0 ] && { echo 'Error: No draft releases found ❌'; exit 1; }
 
+        # Apply sorting
         if [ "$sort_by" != 'none' ]; then
-          echo "Sorting releases by: $sort_by ⬇️"
-          drafts_only=$(echo "$drafts_only" | jq "sort_by(.$sort_by)")
-        fi
-        if [ "$sort_reverse" = 'true' ]; then
-          echo 'Reversing result order 🔄'
-          drafts_only=$(echo "$drafts_only" | jq '. | reverse')
-        fi
-
-        # Note: this is used when no tag/name are provided as inputs
-        # Starting point is the sorted set of data
-        selected_release="$drafts_only"
-        # Perform element selection based on inputs
-        if [ -n "$tag" ]; then
-          echo "Selecting release by tag: $tag 🏷️"
-          selected_release=$(echo "$selected_release" | jq "[.[] | select(.tagName==\"$tag\")]")
-        fi
-        # Selection/filter options can be stacked
-        if [ -n "$name" ]; then
-          echo "Selecting release by name: $name 🔤"
-          selected_release=$(echo "$selected_release" | jq "[.[] | select(.name==\"$name\")]")
-        fi
-
-        # Return first result from whatever element(s) remain
-        selected_release=$(echo "$selected_release" | jq '.[0]')
-        if [ "$selected_release" = 'null' ]; then
-          echo 'Error: GitHub CLI command returned no results ❌'
-          exit 1
-        elif [ "$ACTIONS_STEP_DEBUG" == 'true' ]; then
-          echo 'Sorted GitHub API query data 🐞'
-          echo "$selected_release"
-        fi
-
-        # Promote release using tagName
-        tagName=$(echo "$selected_release" | jq '.tagName' | sed 's:"::g')
-        # Set release as latest if requested by input
-        if [ "${{ inputs.latest }}" = 'true' ]; then
-          release_url=$(gh release edit "$tagName" --draft=false --latest || true)
-        else
-          release_url=$(gh release edit "$tagName" --draft=false || true)
-        fi
-        if [ -n "$release_url" ]; then
-          echo "Release promoted: $release_url ✅"
-        else
-          echo 'Error: GitHub CLI failed to promote release ❌'
-          exit 1
-        fi
-
-        # Validate marking of latest release
-        if [ "${{ inputs.latest }}" = 'true' ]; then
-          release_data=$(gh release list --json \
-            createdAt,isDraft,isLatest,isPrerelease,name,publishedAt,tagName)
-          latest_release=$(echo $release_data | jq "[.[] | select(.isLatest==true)]")
-          latest_tag=$(echo "$latest" | jq '.tagName' | sed 's:"::g')
-          if [ "$tagName" != "$latest_tag" ]; then
-            echo "Successfully designated latest release: $tagName ✅"
+          # Validate sort_by field
+          valid_fields="createdAt isDraft isLatest isPrerelease name publishedAt tagName"
+          if echo "$valid_fields" | grep -qw "$sort_by"; then
+            drafts_only=$(echo "$drafts_only" | jq --arg field "$sort_by" 'sort_by(.[$field])')
           else
-            echo "Failed to designate $tagName as latest release ❌"
+            echo "Error: Invalid sort_by field '$sort_by' ❌"
+            echo "  Valid fields: $valid_fields"
             exit 1
           fi
         fi
+        [ "$sort_reverse" = 'true' ] && drafts_only=$(echo "$drafts_only" | jq 'reverse')
 
-        # Summary output
-        echo "# Promoted Draft Release: $tagName ⏫" >> "$GITHUB_STEP_SUMMARY"
-        echo "$release_url" >> "$GITHUB_STEP_SUMMARY"
-        if [ "${{ inputs.latest }}" = 'true' ]; then
-          echo 'Successfully designated latest release ✅' >> "$GITHUB_STEP_SUMMARY"
+        # Filter by tag/name
+        selected_release="$drafts_only"
+        [ -n "$tag" ] && selected_release=$(echo "$selected_release" | jq --arg tag "$tag" '[.[] | select(.tagName==$tag)]')
+        [ -n "$name" ] && selected_release=$(echo "$selected_release" | jq --arg name "$name" '[.[] | select(.name==$name)]')
+
+        # Validate match
+        matching_count=$(echo "$selected_release" | jq 'length')
+        if [ "$matching_count" -eq 0 ]; then
+          echo 'Error: No draft release matches the specified criteria ❌'
+          [ -n "$tag" ] && echo "  Tag: $tag"
+          [ -n "$name" ] && echo "  Name: $name"
+          exit 1
         fi
 
-        # Set output for use in subsequent steps
+        # Get first match
+        selected_release=$(echo "$selected_release" | jq '.[0]')
+        tagName=$(echo "$selected_release" | jq -r '.tagName')
+
+        # Warn about other drafts
+        if [ "$draft_count" -gt 1 ]; then
+          other_drafts=$(echo "$drafts_only" | jq --arg tag "$tagName" -r '[.[] | select(.tagName != $tag) | .tagName] | join(", ")')
+          if [ -n "$other_drafts" ]; then
+            echo "::warning::Non-matching draft releases found: $other_drafts"
+            echo "⚠️  Other drafts: $other_drafts" >> "$GITHUB_STEP_SUMMARY"
+          fi
+        fi
+
+        # Promote or dry-run
+        if [ "$dry_run" = 'true' ]; then
+          # URL encode the tag name for dry-run URL construction
+          encoded_tag=$(printf %s "$tagName" | jq -sRr @uri)
+          release_url="https://github.com/${{ github.repository }}/releases/tag/$encoded_tag"
+          if [ "${{ inputs.latest }}" = 'true' ]; then
+            echo "Dry-run: Would promote $tagName and set as latest"
+            echo "## 🔍 Dry Run: $tagName" >> "$GITHUB_STEP_SUMMARY"
+            echo "Would promote to latest release" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Dry-run: Would promote $tagName"
+            echo "## 🔍 Dry Run: $tagName" >> "$GITHUB_STEP_SUMMARY"
+            echo "Would promote to release" >> "$GITHUB_STEP_SUMMARY"
+          fi
+        else
+          # Promote the release (gh release edit doesn't return URL)
+          if [ "${{ inputs.latest }}" = 'true' ]; then
+            gh release edit "$tagName" --draft=false --latest
+          else
+            gh release edit "$tagName" --draft=false
+          fi
+
+          # Construct the release URL
+          encoded_tag=$(printf %s "$tagName" | jq -sRr @uri)
+          release_url="https://github.com/${{ github.repository }}/releases/tag/$encoded_tag"
+          echo "Promoted: $release_url ✅"
+          echo "## ⏫ Promoted: $tagName" >> "$GITHUB_STEP_SUMMARY"
+          echo "$release_url" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        # Set outputs
         echo "release_url=$release_url" >> "$GITHUB_ENV"
         echo "release_url=$release_url" >> "$GITHUB_OUTPUT"
