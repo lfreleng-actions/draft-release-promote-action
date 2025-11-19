@@ -33,16 +33,84 @@ The token needs the following permissions:
 
 <!-- markdownlint-disable MD013 -->
 
-| Variable Name | Required | Description                            |
-| ------------- | -------- | -------------------------------------- |
-| token         | True     | GitHub token with relevant permissions |
-| latest        | False    | Mark as the latest release             |
-| tag           | False    | Tag of draft release to promote        |
-| name          | False    | Name of draft release to promote       |
-| sort_by       | False    | Sort by this json element parameter    |
-| sort_reverse  | False    | Reverse the sort order of results      |
+| Variable Name | Required | Description                                       |
+| ------------- | -------- | ------------------------------------------------- |
+| token         | True     | GitHub token with relevant permissions            |
+| latest        | False    | Mark as the latest release                        |
+| tag           | False    | Tag of draft release to promote                   |
+| name          | False    | Name of draft release to promote                  |
+| sort_by       | False    | Sort by this field (valid: `createdAt`, `isDraft`, `isLatest`, `isPrerelease`, `name`, `publishedAt`, `tagName`) |
+| sort_reverse  | False    | Reverse the sort order of results                 |
+| dry-run       | False    | Perform validation without promoting the release  |
 
 <!-- markdownlint-enable MD013 -->
+
+## Behavior
+
+### Dry Run Mode
+
+When `dry-run` is `true`, the action will:
+
+- Perform all validation logic
+- Select the matching draft release
+- Display warnings for non-matching draft releases
+- **Skip the actual promotion** of the release
+- Output what would happen
+
+Example usage:
+
+```yaml
+- name: 'Promote draft release (dry-run)'
+  uses: lfreleng-actions/draft-release-promote-action@main
+  with:
+    token: "${{ secrets.GITHUB_TOKEN }}"
+    tag: "${{ github.ref_name }}"
+    latest: true
+    dry-run: true
+```
+
+Example dry-run output:
+
+```text
+Dry-run: Would promote v0.1.3 and set as latest
+```
+
+The GitHub Step Summary will show:
+
+```markdown
+## 🔍 Dry Run: v0.1.3
+Would promote to latest release
+```
+
+### Draft Releases
+
+When more than one draft release exists in the repository:
+
+- The action will promote the draft release matching the specified `tag` (or `name`)
+- The action warns about other non-matching draft releases
+- The warning appears in both the console output and GitHub Actions step summary
+
+Example warning annotation:
+
+```text
+::warning::Non-matching draft releases found: v0.1.0
+```
+
+When more than one non-matching draft exists, the action comma-separates them:
+
+```text
+::warning::Non-matching draft releases found: v0.1.0, v0.9.0
+```
+
+### Error Handling
+
+The action provides clear error messages for common scenarios:
+
+- GitHub token not provided (required for authentication)
+- `jq` command not found (required for JSON processing)
+- Invalid `sort_by` field value
+- No draft releases found in the repository
+- No draft release matches the specified tag or name
 
 ## Implementation Details
 
@@ -83,4 +151,4 @@ Some examples:
 
 `jq "sort_by(.tagName)"`
 
-`jq '. | reverse`
+`jq '. | reverse'`
