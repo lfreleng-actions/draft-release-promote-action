@@ -33,17 +33,27 @@ The token needs the following permissions:
 
 <!-- markdownlint-disable MD013 -->
 
-| Variable Name | Required | Description                                       |
-| ------------- | -------- | ------------------------------------------------- |
-| token         | True     | GitHub token with relevant permissions            |
-| latest        | False    | Mark as the latest release                        |
-| tag           | False    | Tag of draft release to promote                   |
-| name          | False    | Name of draft release to promote                  |
-| sort_by       | False    | Sort by this field (valid: `createdAt`, `isDraft`, `isLatest`, `isPrerelease`, `name`, `publishedAt`, `tagName`) |
-| sort_reverse  | False    | Reverse the sort order of results                 |
-| dry-run       | False    | Perform validation without promoting the release  |
+| Variable Name | Required | Description                                          |
+| ------------- | -------- | ---------------------------------------------------- |
+| token         | True     | GitHub token with relevant permissions               |
+| latest        | False    | Mark as the latest release                           |
+| tag           | False    | Tag of draft release to promote                      |
+| name          | False    | Name of draft release to promote                     |
+| sort_by       | False    | Sort by this field (see note below for valid options |
+| sort_reverse  | False    | Reverse the sort order of results                    |
+| dry-run       | False    | Perform validation without promoting the release     |
 
 <!-- markdownlint-enable MD013 -->
+
+Valid options for sort_by input:
+
+- createdAt
+- isDraft
+- isLatest
+- isPrerelease
+- name
+- publishedAt
+- tagName
 
 ## Behavior
 
