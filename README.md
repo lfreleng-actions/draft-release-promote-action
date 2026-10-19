@@ -23,9 +23,23 @@ steps:
 
 <!-- markdownlint-enable MD046 -->
 
+The action calls the GitHub API alone, so the job needs no checkout.
+It acts on the repository named by the `repository` input, which
+defaults to the repository running the workflow. To promote a draft
+in another repository, name it and pass a token that can write to it:
+
+```yaml
+- name: 'Promote draft release in another repository'
+  uses: lfreleng-actions/draft-release-promote-action@main
+  with:
+    token: "${{ secrets.RELEASE_TOKEN }}"
+    repository: 'owner/repo'
+    tag: 'v1.2.3'
+```
+
 ## Token Permissions
 
-The token needs the following permissions:
+The token needs the following permission on that repository:
 
 `contents: write`
 
@@ -33,17 +47,23 @@ The token needs the following permissions:
 
 <!-- markdownlint-disable MD013 -->
 
-| Variable Name | Required | Description                                          |
-| ------------- | -------- | ---------------------------------------------------- |
-| token         | True     | GitHub token with relevant permissions               |
-| latest        | False    | Mark as the latest release                           |
-| tag           | False    | Tag of draft release to promote                      |
-| name          | False    | Name of draft release to promote                     |
-| sort_by       | False    | Sort by this field (see note below for valid options |
-| sort_reverse  | False    | Reverse the sort order of results                    |
-| dry-run       | False    | Perform validation without promoting the release     |
+| Variable Name | Required | Description                                                 |
+| ------------- | -------- | ----------------------------------------------------------- |
+| token         | True     | GitHub token with relevant permissions                      |
+| repository    | False    | Repository as `owner/repo`; defaults to `github.repository` |
+| latest        | False    | Mark as the latest release (default: false; see note below) |
+| tag           | False    | Tag of draft release to promote                             |
+| name          | False    | Name of draft release to promote                            |
+| sort_by       | False    | Sort by this field (see note below for valid options        |
+| sort_reverse  | False    | Reverse the sort order of results                           |
+| dry-run       | False    | Perform validation without promoting the release            |
 
 <!-- markdownlint-enable MD013 -->
+
+The GitHub API marks a newly published release as Latest unless told
+otherwise. The action passes `--latest` when `latest` is
+`true`, and `--latest=false` for any other value, so a release promoted
+with `latest: false` (a backport, for example) does not become Latest.
 
 Valid options for sort_by input:
 
@@ -119,14 +139,25 @@ The action provides clear error messages for common scenarios:
 - GitHub token not provided (required for authentication)
 - `jq` command not found (required for JSON processing)
 - Invalid `sort_by` field value
+- `repository` not in `owner/repo` form
 - No draft releases found in the repository
+- No release exists for the specified tag
+- The release for the specified tag is not a draft
 - No draft release matches the specified tag or name
 
 ## Implementation Details
 
-Uses the GitHub CLI command:
+Every GitHub CLI call passes `--repo` with the `repository` input, so
+`gh` never infers the repository from a local checkout.
 
-`gh release list --json createdAt,isDraft,isLatest,isPrerelease,name,publishedAt,tagName`
+Given a `tag`, the action looks the release up directly:
+
+`gh release view "$tag" --repo owner/repo --json tagName,name,isDraft`
+
+To select a draft when `tag` is empty, and to warn about other drafts,
+it lists releases:
+
+`gh release list --repo owner/repo --limit 1000 --json createdAt,isDraft,isLatest,isPrerelease,name,publishedAt,tagName`
 
 Example output:
 

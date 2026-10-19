@@ -1,0 +1,259 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Exercises the action against a stub gh, which records its arguments
+# and returns canned release data, so no real release is touched. The
+# action is checked out into a subdirectory: the workspace root is not
+# a git repository, as in a caller job with no checkout of its own.
+name: 'Test GitHub Action 🧪'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  stub-tests:
+    name: 'Test against stub gh'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: read  # Check out the action under test
+    timeout-minutes: 5
+    env:
+      OTHER_REPO: 'other-owner/other-repo'
+    steps:
+      # Load the egress allow-list out-of-band from the
+      # organisation's .github repository and publish it as
+      # $CONNECTION_ALLOW_LIST for the harden-runner step below.
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+
+      # Harden the runner with the just-loaded allow-list.
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # The self-repository form (uses: $/) needs no checkout, but the
+      # pinned actionlint hook rejects it, so steps below use ./ paths.
+      - name: 'Checkout action under test'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          path: 'action-under-test'
+          persist-credentials: false
+
+      - name: 'Install stub gh first on PATH'
+        shell: bash
+        run: |
+          # Install stub gh first on PATH
+          stub_dir="$RUNNER_TEMP/gh-stub"
+          mkdir -p "$stub_dir"
+          cat > "$stub_dir/gh" << 'STUB'
+          #!/usr/bin/env bash
+          # Record each call on one line, then answer from canned data
+          printf '%s\n' "$*" >> "$GH_STUB_LOG"
+          case "$1 $2" in
+            'release list')
+              printf '%s\n' '[
+                {"createdAt": "2026-01-02T00:00:00Z", "isDraft": true,
+                 "isLatest": false, "isPrerelease": false, "name": "Second",
+                 "publishedAt": "0001-01-01T00:00:00Z", "tagName": "v2.0.0"},
+                {"createdAt": "2026-01-01T00:00:00Z", "isDraft": false,
+                 "isLatest": true, "isPrerelease": false, "name": "First",
+                 "publishedAt": "2026-01-01T00:00:00Z", "tagName": "v1.0.0"}
+              ]'
+              ;;
+            'release view')
+              case "$3" in
+                v2.0.0)
+                  echo '{"isDraft":true,"name":"Second","tagName":"v2.0.0"}'
+                  ;;
+                v1.0.0)
+                  echo '{"isDraft":false,"name":"First","tagName":"v1.0.0"}'
+                  ;;
+                *) echo 'release not found' >&2; exit 1 ;;
+              esac
+              ;;
+            'release edit') ;;
+            *) echo "Unexpected gh call: $*" >&2; exit 1 ;;
+          esac
+          STUB
+          chmod +x "$stub_dir/gh"
+          echo "$stub_dir" >> "$GITHUB_PATH"
+          echo "GH_STUB_LOG=$stub_dir/calls.log" >> "$GITHUB_ENV"
+
+      # Default inputs: repository from the context, latest false
+      - name: 'Reset stub log'
+        shell: bash
+        run: ': > "$GH_STUB_LOG"'
+      - name: 'Promote with default inputs'
+        id: defaults
+        uses: ./action-under-test  # zizmor: ignore[self-repository]
+        with:
+          token: 'stub-token'
+      - name: 'Check default inputs'
+        shell: bash
+        env:
+          REPO: "${{ github.repository }}"
+          RELEASE_URL: "${{ steps.defaults.outputs.release_url }}"
+        run: |
+          # Check default inputs
+          cat "$GH_STUB_LOG"
+          [ -s "$GH_STUB_LOG" ]
+          if grep -v -- "--repo $REPO\( \|$\)" "$GH_STUB_LOG"; then
+            echo 'Error: gh called without --repo for the repository ❌'
+            exit 1
+          fi
+          grep -qx -- \
+            "release edit v2.0.0 --repo $REPO --draft=false --latest=false" \
+            "$GH_STUB_LOG"
+          [ "$RELEASE_URL" = "https://github.com/$REPO/releases/tag/v2.0.0" ]
+
+      # Explicit repository, tag lookup and latest true
+      - name: 'Reset stub log'
+        shell: bash
+        run: ': > "$GH_STUB_LOG"'
+      - name: 'Promote tag in another repository as latest'
+        id: other
+        uses: ./action-under-test  # zizmor: ignore[self-repository]
+        with:
+          token: 'stub-token'
+          repository: "${{ env.OTHER_REPO }}"
+          tag: 'v2.0.0'
+          latest: 'true'
+      - name: 'Check explicit repository, tag and latest'
+        shell: bash
+        env:
+          RELEASE_URL: "${{ steps.other.outputs.release_url }}"
+        run: |
+          # Check explicit repository, tag and latest
+          cat "$GH_STUB_LOG"
+          if grep -v -- "--repo $OTHER_REPO\( \|$\)" "$GH_STUB_LOG"; then
+            echo 'Error: gh called without --repo for the repository ❌'
+            exit 1
+          fi
+          view_json='--json tagName,name,isDraft'
+          grep -qx -- \
+            "release view v2.0.0 --repo $OTHER_REPO $view_json" "$GH_STUB_LOG"
+          grep -qx -- \
+            "release edit v2.0.0 --repo $OTHER_REPO --draft=false --latest" \
+            "$GH_STUB_LOG"
+          expected="https://github.com/$OTHER_REPO/releases/tag/v2.0.0"
+          [ "$RELEASE_URL" = "$expected" ]
+
+      # Dry run: selects the draft, never edits it
+      - name: 'Reset stub log'
+        shell: bash
+        run: ': > "$GH_STUB_LOG"'
+      - name: 'Dry run'
+        id: dry-run
+        uses: ./action-under-test  # zizmor: ignore[self-repository]
+        with:
+          token: 'stub-token'
+          dry-run: 'true'
+      - name: 'Check dry run'
+        shell: bash
+        env:
+          REPO: "${{ github.repository }}"
+          RELEASE_URL: "${{ steps.dry-run.outputs.release_url }}"
+        run: |
+          # Check dry run
+          cat "$GH_STUB_LOG"
+          [ -s "$GH_STUB_LOG" ]
+          if grep -- '^release edit' "$GH_STUB_LOG"; then
+            echo 'Error: dry run edited a release ❌'
+            exit 1
+          fi
+          [ "$RELEASE_URL" = "https://github.com/$REPO/releases/tag/v2.0.0" ]
+
+      # Tag whose release is already published
+      - name: 'Reset stub log'
+        shell: bash
+        run: ': > "$GH_STUB_LOG"'
+      - name: 'Promote published release (expected to fail)'
+        id: published
+        continue-on-error: true
+        uses: ./action-under-test  # zizmor: ignore[self-repository]
+        with:
+          token: 'stub-token'
+          tag: 'v1.0.0'
+      - name: 'Check published release is refused'
+        shell: bash
+        env:
+          OUTCOME: "${{ steps.published.outcome }}"
+        run: |
+          # Check published release is refused
+          cat "$GH_STUB_LOG"
+          [ "$OUTCOME" = 'failure' ]
+          grep -q -- '^release view v1.0.0 ' "$GH_STUB_LOG"
+          if grep -- '^release edit' "$GH_STUB_LOG"; then
+            echo 'Error: refused release was edited ❌'
+            exit 1
+          fi
+
+      # Tag with no release
+      - name: 'Reset stub log'
+        shell: bash
+        run: ': > "$GH_STUB_LOG"'
+      - name: 'Promote missing tag (expected to fail)'
+        id: missing
+        continue-on-error: true
+        uses: ./action-under-test  # zizmor: ignore[self-repository]
+        with:
+          token: 'stub-token'
+          tag: 'v9.9.9'
+      - name: 'Check missing tag is refused'
+        shell: bash
+        env:
+          OUTCOME: "${{ steps.missing.outcome }}"
+        run: |
+          # Check missing tag is refused
+          cat "$GH_STUB_LOG"
+          [ "$OUTCOME" = 'failure' ]
+          grep -q -- '^release view v9.9.9 ' "$GH_STUB_LOG"
+          if grep -- '^release edit' "$GH_STUB_LOG"; then
+            echo 'Error: refused release was edited ❌'
+            exit 1
+          fi
+
+      # Repository not in owner/repo form
+      - name: 'Reset stub log'
+        shell: bash
+        run: ': > "$GH_STUB_LOG"'
+      - name: 'Promote with invalid repository (expected to fail)'
+        id: invalid
+        continue-on-error: true
+        uses: ./action-under-test  # zizmor: ignore[self-repository]
+        with:
+          token: 'stub-token'
+          repository: 'not-a-repository'
+      - name: 'Check invalid repository is refused before gh'
+        shell: bash
+        env:
+          OUTCOME: "${{ steps.invalid.outcome }}"
+        run: |
+          # Check invalid repository is refused before gh
+          [ "$OUTCOME" = 'failure' ]
+          if [ -s "$GH_STUB_LOG" ]; then
+            cat "$GH_STUB_LOG"
+            echo 'Error: gh called for an invalid repository ❌'
+            exit 1
+          fi
