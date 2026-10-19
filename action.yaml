@@ -13,8 +13,12 @@ inputs:
     description: 'GitHub Token with write content permissions'
     required: true
   # Optional
+  repository:
+    description: 'Repository holding the draft release, as owner/repo'
+    required: false
+    default: "${{ github.repository }}"
   latest:
-    description: 'Mark as the latest release'
+    description: 'Mark as the latest release; false keeps it off Latest'
     required: false
     default: 'false'
   tag:
@@ -49,23 +53,26 @@ runs:
       id: promote-draft-release
       env:
         GITHUB_TOKEN: "${{ inputs.token }}"
+        INPUT_REPOSITORY: "${{ inputs.repository }}"
         INPUT_TAG: "${{ inputs.tag }}"
         INPUT_NAME: "${{ inputs.name }}"
         INPUT_SORT_BY: "${{ inputs.sort_by }}"
         INPUT_SORT_REVERSE: "${{ inputs.sort_reverse }}"
         INPUT_DRY_RUN: "${{ inputs['dry-run'] }}"
         INPUT_LATEST: "${{ inputs.latest }}"
-        GH_REPOSITORY: "${{ github.repository }}"
       shell: bash
       # yamllint disable rule:line-length
       run: |
         # Capture draft releases in repository
 
+        repository="$INPUT_REPOSITORY"
         tag="$INPUT_TAG"
         name="$INPUT_NAME"
         sort_by="$INPUT_SORT_BY"
         sort_reverse="$INPUT_SORT_REVERSE"
         dry_run="$INPUT_DRY_RUN"
+        # gh fetches 30 releases unless told otherwise
+        list_limit=1000
 
         # Validate prerequisites
         if [ -z "$GITHUB_TOKEN" ]; then
@@ -78,53 +85,76 @@ runs:
           exit 1
         fi
 
-        # Get all releases
-        release_data=$(gh release list --json createdAt,isDraft,isLatest,isPrerelease,name,publishedAt,tagName)
-        [ -z "$release_data" ] && { echo 'Error: No releases found ❌'; exit 1; }
-        [ "$ACTIONS_STEP_DEBUG" = 'true' ] && echo "Raw data: $release_data"
-
-        # Ensure data is an array
-        echo "$release_data" | jq -e 'type == "array"' > /dev/null 2>&1 || release_data=$(echo "$release_data" | jq -s '.')
-
-        # Filter to drafts only
-        drafts_only=$(echo "$release_data" | jq '[.[] | select(.isDraft==true)]')
-        draft_count=$(echo "$drafts_only" | jq 'length')
-        [ "$draft_count" -eq 0 ] && { echo 'Error: No draft releases found ❌'; exit 1; }
-
-        # Apply sorting
-        if [ "$sort_by" != 'none' ]; then
-          # Validate sort_by field
-          valid_fields="createdAt isDraft isLatest isPrerelease name publishedAt tagName"
-          if echo "$valid_fields" | grep -qw "$sort_by"; then
-            drafts_only=$(echo "$drafts_only" | jq --arg field "$sort_by" 'sort_by(.[$field])')
-          else
-            echo "Error: Invalid sort_by field '$sort_by' ❌"
-            echo "  Valid fields: $valid_fields"
-            exit 1
-          fi
-        fi
-        [ "$sort_reverse" = 'true' ] && drafts_only=$(echo "$drafts_only" | jq 'reverse')
-
-        # Filter by tag/name
-        selected_release="$drafts_only"
-        [ -n "$tag" ] && selected_release=$(echo "$selected_release" | jq --arg tag "$tag" '[.[] | select(.tagName==$tag)]')
-        [ -n "$name" ] && selected_release=$(echo "$selected_release" | jq --arg name "$name" '[.[] | select(.name==$name)]')
-
-        # Validate match
-        matching_count=$(echo "$selected_release" | jq 'length')
-        if [ "$matching_count" -eq 0 ]; then
-          echo 'Error: No draft release matches the specified criteria ❌'
-          [ -n "$tag" ] && echo "  Tag: $tag"
-          [ -n "$name" ] && echo "  Name: $name"
+        if ! [[ "$repository" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]] \
+          || [[ "${repository#*/}" =~ ^\.\.?$ ]]; then
+          echo "Error: Invalid repository '$repository'; expected owner/repo ❌"
           exit 1
         fi
 
-        # Get first match
-        selected_release=$(echo "$selected_release" | jq '.[0]')
+        valid_fields="createdAt isDraft isLatest isPrerelease name publishedAt tagName"
+        if [ "$sort_by" != 'none' ] && ! echo "$valid_fields" | grep -qw -- "$sort_by"; then
+          echo "Error: Invalid sort_by field '$sort_by' ❌"
+          echo "  Valid fields: $valid_fields"
+          exit 1
+        fi
+
+        list_drafts() {
+          local data
+          data=$(gh release list --repo "$repository" --limit "$list_limit" \
+            --json createdAt,isDraft,isLatest,isPrerelease,name,publishedAt,tagName) || return 1
+          [ "$ACTIONS_STEP_DEBUG" = 'true' ] && echo "Raw data: $data" >&2
+          [ -z "$data" ] && data='[]'
+          # Ensure data is an array
+          echo "$data" | jq -e 'type == "array"' > /dev/null 2>&1 || data=$(echo "$data" | jq -s '.')
+          echo "$data" | jq '[.[] | select(.isDraft==true)]'
+        }
+
+        if [ -n "$tag" ]; then
+          # Look the tag up directly: a listing is capped and may miss it
+          if ! selected_release=$(gh release view "$tag" --repo "$repository" --json tagName,name,isDraft); then
+            echo "Error: No release found for tag '$tag' in $repository ❌"
+            exit 1
+          fi
+          if [ "$(echo "$selected_release" | jq -r '.isDraft')" != 'true' ]; then
+            echo "Error: Release for tag '$tag' in $repository is not a draft ❌"
+            exit 1
+          fi
+          if [ -n "$name" ] && [ "$(echo "$selected_release" | jq -r '.name')" != "$name" ]; then
+            echo 'Error: No draft release matches the specified criteria ❌'
+            echo "  Tag: $tag"
+            echo "  Name: $name"
+            exit 1
+          fi
+          drafts_only=$(list_drafts) || { echo "Error: Failed to list releases in $repository ❌"; exit 1; }
+          draft_count=$(echo "$drafts_only" | jq 'length')
+        else
+          drafts_only=$(list_drafts) || { echo "Error: Failed to list releases in $repository ❌"; exit 1; }
+          draft_count=$(echo "$drafts_only" | jq 'length')
+          [ "$draft_count" -eq 0 ] && { echo 'Error: No draft releases found ❌'; exit 1; }
+
+          # Apply sorting
+          [ "$sort_by" != 'none' ] && drafts_only=$(echo "$drafts_only" | jq --arg field "$sort_by" 'sort_by(.[$field])')
+          [ "$sort_reverse" = 'true' ] && drafts_only=$(echo "$drafts_only" | jq 'reverse')
+
+          # Filter by name
+          selected_release="$drafts_only"
+          [ -n "$name" ] && selected_release=$(echo "$selected_release" | jq --arg name "$name" '[.[] | select(.name==$name)]')
+
+          # Validate match
+          matching_count=$(echo "$selected_release" | jq 'length')
+          if [ "$matching_count" -eq 0 ]; then
+            echo 'Error: No draft release matches the specified criteria ❌'
+            [ -n "$name" ] && echo "  Name: $name"
+            exit 1
+          fi
+
+          # Get first match
+          selected_release=$(echo "$selected_release" | jq '.[0]')
+        fi
         tagName=$(echo "$selected_release" | jq -r '.tagName')
 
         # Warn about other drafts
-        if [ "$draft_count" -gt 1 ]; then
+        if [ "$draft_count" -gt 0 ]; then
           other_drafts=$(echo "$drafts_only" | jq --arg tag "$tagName" -r '[.[] | select(.tagName != $tag) | .tagName] | join(", ")')
           if [ -n "$other_drafts" ]; then
             echo "::warning::Non-matching draft releases found: $other_drafts"
@@ -132,31 +162,30 @@ runs:
           fi
         fi
 
+        encoded_tag=$(printf %s "$tagName" | jq -sRr @uri)
+        release_url="https://github.com/$repository/releases/tag/$encoded_tag"
+
         # Promote or dry-run
         if [ "$dry_run" = 'true' ]; then
-          # URL encode the tag name for dry-run URL construction
-          encoded_tag=$(printf %s "$tagName" | jq -sRr @uri)
-          release_url="https://github.com/$GH_REPOSITORY/releases/tag/$encoded_tag"
+          echo "## 🔍 Dry Run: $tagName" >> "$GITHUB_STEP_SUMMARY"
           if [ "$INPUT_LATEST" = 'true' ]; then
-            echo "Dry-run: Would promote $tagName and set as latest"
-            echo "## 🔍 Dry Run: $tagName" >> "$GITHUB_STEP_SUMMARY"
+            echo "Dry-run: Would promote $tagName in $repository and set as latest"
             echo "Would promote to latest release" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Dry-run: Would promote $tagName"
-            echo "## 🔍 Dry Run: $tagName" >> "$GITHUB_STEP_SUMMARY"
+            echo "Dry-run: Would promote $tagName in $repository"
             echo "Would promote to release" >> "$GITHUB_STEP_SUMMARY"
           fi
         else
-          # Promote the release (gh release edit doesn't return URL)
+          # Without an explicit flag, the API marks a newly published
+          # release as Latest, so always state the caller's choice
           if [ "$INPUT_LATEST" = 'true' ]; then
-            gh release edit "$tagName" --draft=false --latest
+            latest_flag='--latest'
           else
-            gh release edit "$tagName" --draft=false
+            latest_flag='--latest=false'
           fi
+          # gh release edit doesn't return the URL
+          gh release edit "$tagName" --repo "$repository" --draft=false "$latest_flag"
 
-          # Construct the release URL
-          encoded_tag=$(printf %s "$tagName" | jq -sRr @uri)
-          release_url="https://github.com/$GH_REPOSITORY/releases/tag/$encoded_tag"
           echo "Promoted: $release_url ✅"
           echo "## ⏫ Promoted: $tagName" >> "$GITHUB_STEP_SUMMARY"
           echo "$release_url" >> "$GITHUB_STEP_SUMMARY"
